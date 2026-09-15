@@ -1,3 +1,4 @@
+import hashlib
 import os
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -5,8 +6,9 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 
 # 配置
-KNOWLEDGE_DIR = "knowledge_base"
-CHROMA_DIR = "./chroma_db"
+KNOWLEDGE_DIR = os.environ.get("PC_AGENT_KNOWLEDGE_DIR", "knowledge_base")
+CHROMA_DIR = os.environ.get("PC_AGENT_CHROMA_DIR", "./chroma_db")
+COLLECTION_NAME = os.environ.get("PC_AGENT_CHROMA_COLLECTION", "safedesk_knowledge")
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
 EMBEDDING_MODEL = "shibing624/text2vec-base-chinese"  # 中文嵌入模型
@@ -45,16 +47,30 @@ def main():
     print(f"已分割为 {len(chunks)} 个文本块。")
     
     print("正在加载嵌入模型（首次运行会下载模型，稍等）...")
-    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    offline = os.environ.get("PC_AGENT_OFFLINE", "0") == "1"
+    model_kwargs = {"local_files_only": True} if offline else {}
+    embeddings = HuggingFaceEmbeddings(
+        model_name=EMBEDDING_MODEL,
+        model_kwargs=model_kwargs,
+    )
     
     print("正在构建向量数据库...")
-    vectorstore = Chroma.from_documents(
+    ids = [
+        hashlib.sha256(
+            f"{document.metadata.get('source', '')}:{index}:{document.page_content}".encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        for index, document in enumerate(chunks)
+    ]
+    Chroma.from_documents(
         documents=chunks,
         embedding=embeddings,
-        persist_directory=CHROMA_DIR
+        ids=ids,
+        collection_name=COLLECTION_NAME,
+        persist_directory=CHROMA_DIR,
     )
-    # vectorstore.persist()
-    print(f"知识库构建完成！已保存至 {CHROMA_DIR}")
+    print(f"知识库构建完成！已保存至 {CHROMA_DIR}，集合：{COLLECTION_NAME}")
 
 if __name__ == "__main__":
     main()

@@ -1,10 +1,13 @@
 import hashlib
 import json
 import sqlite3
+import time
 
 import sandbox
 from agent.simple_agent import AgentStatus, run_agent, simple_agent
+from agent.run_control import AgentRunControl, StopReason
 from agent.trace_store import get_recent_traces
+from agent.tool_registry import TOOL_REGISTRY, ToolDefinition
 
 
 def fake_llm(payload):
@@ -155,3 +158,53 @@ def test_multiple_observations_are_summarized(tmp_path, monkeypatch):
     assert result.response == "综合报告：CPU 与内存数据已采集。"
     assert result.trace_id
     assert get_recent_traces(1)[0]["trace_id"] == result.trace_id
+
+
+def test_pre_cancelled_run_does_not_call_model(tmp_path, monkeypatch):
+    configure_safe_test_runtime(monkeypatch, tmp_path)
+    control = AgentRunControl()
+    control.request_stop(StopReason.CANCELLED)
+
+    def model_must_not_be_called(_messages):
+        raise AssertionError("cancelled task must stop before model inference")
+
+    result = run_agent("查看CPU", model_must_not_be_called, run_control=control)
+
+    assert result.status is AgentStatus.CANCELLED
+    trace = get_recent_traces(1)[0]
+    assert trace["status"] == "cancelled"
+    assert trace["model_ms"] == 0
+    assert trace["tool_ms"] == 0
+
+
+def test_trace_separates_model_and_tool_time(tmp_path, monkeypatch):
+    configure_safe_test_runtime(monkeypatch, tmp_path)
+    original = TOOL_REGISTRY["get_cpu_usage"]
+
+    def slow_tool():
+        time.sleep(0.01)
+        return "CPU使用率: 10%"
+
+    monkeypatch.setitem(
+        TOOL_REGISTRY,
+        "get_cpu_usage",
+        ToolDefinition(
+            name=original.name,
+            params_model=original.params_model,
+            handler=slow_tool,
+            risk_level=original.risk_level,
+        ),
+    )
+
+    def slow_model(_messages):
+        time.sleep(0.01)
+        return '[{"tool":"get_cpu_usage","params":{}}]'
+
+    result = run_agent("查看CPU", slow_model, queue_ms=2.5)
+    trace = get_recent_traces(1)[0]
+
+    assert result.status is AgentStatus.COMPLETED
+    assert trace["queue_ms"] == 2.5
+    assert trace["model_ms"] >= 5
+    assert trace["tool_ms"] >= 5
+    assert trace["total_ms"] >= trace["queue_ms"] + trace["model_ms"]

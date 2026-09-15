@@ -15,6 +15,12 @@ from agent.plan_store import (
     create_pending_plan,
     finish_claimed_plan,
 )
+from agent.run_control import (
+    AgentRunControl,
+    AgentRunMetrics,
+    AgentRunStopped,
+    StopReason,
+)
 from agent.tool_protocol import ToolProtocolError, parse_tool_calls
 from agent.tool_registry import TOOL_REGISTRY, ToolDefinition
 from agent.trace_store import record_trace
@@ -63,6 +69,8 @@ class AgentStatus(str, Enum):
     CONFIRMATION_REQUIRED = "confirmation_required"
     REFUSED = "refused"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
 
 
 class AgentResult(BaseModel):
@@ -79,6 +87,27 @@ def _friendly_no_tool_response() -> str:
 
 
 ValidatedCall = tuple[ToolDefinition, dict, dict]
+
+
+def _check_control(run_control: AgentRunControl | None) -> None:
+    if run_control is not None:
+        run_control.raise_if_stopped()
+
+
+def _call_llm(
+    llm_func,
+    messages: list[dict],
+    run_control: AgentRunControl | None,
+    run_metrics: AgentRunMetrics | None,
+) -> str:
+    """Measure a synchronous model call and stop only at safe boundaries."""
+    _check_control(run_control)
+    started = time.perf_counter()
+    try:
+        return llm_func(messages)
+    finally:
+        if run_metrics is not None:
+            run_metrics.add_model_time((time.perf_counter() - started) * 1000)
 
 
 def _validated_plan(response: str) -> list[ValidatedCall]:
@@ -139,19 +168,28 @@ def _execute_plan(
     plan: list[ValidatedCall],
     *,
     confirmed: bool,
+    run_control: AgentRunControl | None = None,
+    run_metrics: AgentRunMetrics | None = None,
 ) -> tuple[str, bool, list[dict]]:
     results: list[str] = []
     steps: list[dict] = []
     success = True
     for definition, params, prepared in plan:
+        _check_control(run_control)
         invocation_params = dict(params)
         invocation_params.update(prepared)
         if definition.requires_confirmation:
             invocation_params["confirmed"] = confirmed
+        started = time.perf_counter()
         try:
             result = str(definition.handler(**invocation_params))
+        except AgentRunStopped:
+            raise
         except Exception as exc:
             result = f"工具 {definition.name} 执行失败：{type(exc).__name__}: {exc}"
+        finally:
+            if run_metrics is not None:
+                run_metrics.add_tool_time((time.perf_counter() - started) * 1000)
         if _result_failed(result):
             success = False
         log_audit(
@@ -174,7 +212,13 @@ def _execute_plan(
     return "\n".join(results), success, steps
 
 
-def _summarize_tool_results(user_input: str, steps: list[dict], llm_func) -> str:
+def _summarize_tool_results(
+    user_input: str,
+    steps: list[dict],
+    llm_func,
+    run_control: AgentRunControl | None = None,
+    run_metrics: AgentRunMetrics | None = None,
+) -> str:
     """Turn multiple observations into a grounded user-facing report."""
     observations = "\n\n".join(
         f"工具：{step['tool']}\n结果：{step['result']}" for step in steps
@@ -195,23 +239,53 @@ def _summarize_tool_results(user_input: str, steps: list[dict], llm_func) -> str
         },
     ]
     try:
-        summary = str(llm_func(messages)).strip()
+        summary = str(
+            _call_llm(llm_func, messages, run_control, run_metrics)
+        ).strip()
+    except AgentRunStopped:
+        raise
     except Exception as exc:
         return f"{observations}\n\n生成综合报告失败：{type(exc).__name__}: {exc}"
     return summary or observations
 
 
-def _execute_confirmed_plan(confirmation_token: str, llm_func) -> AgentResult:
+def _execute_confirmed_plan(
+    confirmation_token: str,
+    llm_func,
+    run_control: AgentRunControl | None = None,
+    run_metrics: AgentRunMetrics | None = None,
+) -> AgentResult:
+    _check_control(run_control)
     try:
         claimed = claim_pending_plan(confirmation_token)
     except PendingPlanError as exc:
         return AgentResult(response=f"未执行任何操作：{exc}", status=AgentStatus.REFUSED)
 
     try:
+        _check_control(run_control)
         plan = _validate_stored_calls(claimed.calls)
-        response, success, steps = _execute_plan(plan, confirmed=True)
+        response, success, steps = _execute_plan(
+            plan,
+            confirmed=True,
+            run_control=run_control,
+            run_metrics=run_metrics,
+        )
         if success and len(steps) > 1:
-            response = _summarize_tool_results(claimed.user_input, steps, llm_func)
+            try:
+                response = _summarize_tool_results(
+                    claimed.user_input,
+                    steps,
+                    llm_func,
+                    run_control,
+                    run_metrics,
+                )
+            except AgentRunStopped:
+                # Tool side effects already completed; cancellation is too late to
+                # rewrite the outcome. Return the grounded raw observations.
+                pass
+    except AgentRunStopped as exc:
+        finish_claimed_plan(claimed.token_hash, success=False, result=str(exc))
+        raise
     except Exception as exc:
         response = f"已保存计划执行失败：{type(exc).__name__}: {exc}"
         success = False
@@ -229,19 +303,30 @@ def _run_agent_core(
     llm_func=chat_completion,
     *,
     confirmation_token: str | None = None,
+    run_control: AgentRunControl | None = None,
+    run_metrics: AgentRunMetrics | None = None,
 ) -> AgentResult:
     """Create a plan or atomically execute a previously confirmed plan."""
     if confirmation_token:
         # Confirmation never asks the model to plan again; it may summarize observations afterward.
-        return _execute_confirmed_plan(confirmation_token, llm_func)
+        return _execute_confirmed_plan(
+            confirmation_token,
+            llm_func,
+            run_control,
+            run_metrics,
+        )
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_input},
     ]
     try:
-        response = llm_func(messages)
+        response = _call_llm(llm_func, messages, run_control, run_metrics)
+        # A model call cannot always be interrupted, so check again before tools run.
+        _check_control(run_control)
         plan = _validated_plan(response)
+    except AgentRunStopped:
+        raise
     except ToolProtocolError as exc:
         return AgentResult(
             response=f"未执行任何操作：{exc}",
@@ -264,6 +349,7 @@ def _run_agent_core(
         previews: list[str] = []
         prepared_plan: list[ValidatedCall] = []
         for definition, params, prepared in plan:
+            _check_control(run_control)
             if not definition.requires_confirmation:
                 prepared_plan.append((definition, params, prepared))
                 continue
@@ -279,6 +365,7 @@ def _run_agent_core(
             prepared_plan.append((definition, params, prepared))
 
         plan = prepared_plan
+        _check_control(run_control)
 
         preview_text = "\n".join(previews)
         stored = create_pending_plan(
@@ -306,9 +393,25 @@ def _run_agent_core(
             expires_at=stored.expires_at,
         )
 
-    response, success, steps = _execute_plan(plan, confirmed=False)
+    response, success, steps = _execute_plan(
+        plan,
+        confirmed=False,
+        run_control=run_control,
+        run_metrics=run_metrics,
+    )
     if success and len(steps) > 1:
-        response = _summarize_tool_results(user_input, steps, llm_func)
+        try:
+            response = _summarize_tool_results(
+                user_input,
+                steps,
+                llm_func,
+                run_control,
+                run_metrics,
+            )
+        except AgentRunStopped:
+            # All planned tools already completed, so report their observations
+            # instead of claiming that their side effects were cancelled.
+            pass
     return AgentResult(
         response=response,
         status=AgentStatus.COMPLETED if success else AgentStatus.FAILED,
@@ -320,16 +423,32 @@ def run_agent(
     llm_func=chat_completion,
     *,
     confirmation_token: str | None = None,
+    trace_id: str | None = None,
+    run_control: AgentRunControl | None = None,
+    run_metrics: AgentRunMetrics | None = None,
+    queue_ms: float = 0.0,
 ) -> AgentResult:
     """Run the Agent and persist an end-to-end trace for later evaluation."""
-    trace_id = secrets.token_urlsafe(12)
+    trace_id = trace_id or secrets.token_urlsafe(12)
+    run_metrics = run_metrics or AgentRunMetrics()
     started = time.perf_counter()
-    result = _run_agent_core(
-        user_input,
-        llm_func,
-        confirmation_token=confirmation_token,
-    )
+    try:
+        result = _run_agent_core(
+            user_input,
+            llm_func,
+            confirmation_token=confirmation_token,
+            run_control=run_control,
+            run_metrics=run_metrics,
+        )
+    except AgentRunStopped as exc:
+        status = (
+            AgentStatus.CANCELLED
+            if exc.reason is StopReason.CANCELLED
+            else AgentStatus.TIMED_OUT
+        )
+        result = AgentResult(response=str(exc), status=status)
     duration_ms = (time.perf_counter() - started) * 1000
+    measured = run_metrics.snapshot()
     try:
         record_trace(
             trace_id=trace_id,
@@ -339,6 +458,10 @@ def run_agent(
             plan_hash=result.plan_hash,
             duration_ms=duration_ms,
             is_confirmation=bool(confirmation_token),
+            queue_ms=queue_ms,
+            model_ms=measured["model_ms"],
+            tool_ms=measured["tool_ms"],
+            total_ms=queue_ms + duration_ms,
         )
     except Exception:
         # Trace persistence must not turn a completed user operation into failure.

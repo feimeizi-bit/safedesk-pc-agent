@@ -1,0 +1,19 @@
+{"id":"rename","question":"怎样一次给多个文件改名？","expected_source":"办公效率技巧.txt","answer_keywords":["F2","自动编号"],"should_answer":true}
+{"id":"deduplicate","question":"Excel 表格如何快速删除重复数据？","expected_source":"办公效率技巧.txt","answer_keywords":["删除重复项"],"should_answer":true}
+{"id":"pdf_word","question":"怎样把 PDF 文件转换成 Word？","expected_source":"办公效率技巧.txt","answer_keywords":["Microsoft Word","在线转换"],"should_answer":true}
+{"id":"slow_pc","question":"电脑变得很卡、运行缓慢应该怎么办？","expected_source":"电脑维护与故障排除.txt","answer_keywords":["任务管理器","临时文件"],"should_answer":true}
+{"id":"temperature","question":"查看电脑温度可以用什么工具？","expected_source":"电脑维护与故障排除.txt","answer_keywords":["HWMonitor","Core Temp"],"should_answer":true}
+{"id":"memory","question":"系统提示内存不足时怎么处理？","expected_source":"电脑维护与故障排除.txt","answer_keywords":["浏览器标签","虚拟内存"],"should_answer":true}
+{"id":"desktop","question":"如何按照文件类型整理桌面？","expected_source":"电脑维护与故障排除.txt","answer_keywords":["扩展名","文件夹"],"should_answer":true}
+{"id":"task_manager","question":"任务管理器中应该重点观察哪些指标？","expected_source":"Windows系统诊断与维护.txt","answer_keywords":["CPU","内存"],"should_answer":true}
+{"id":"disk_space","question":"Windows 磁盘空间不足时可以先清理什么？","expected_source":"Windows系统诊断与维护.txt","answer_keywords":["临时文件","回收站"],"should_answer":true}
+{"id":"wifi","question":"连上 Wi-Fi 却打不开网页怎么排查？","expected_source":"网络连接排障.txt","answer_keywords":["重新连接","DNS"],"should_answer":true}
+{"id":"public_wifi","question":"使用公共 Wi-Fi 时有哪些安全注意事项？","expected_source":"网络连接排障.txt","answer_keywords":["HTTPS","网络发现"],"should_answer":true}
+{"id":"preview","question":"为什么批量整理文件之前要先预览？","expected_source":"文件整理与备份.txt","answer_keywords":["目标目录","操作清单"],"should_answer":true}
+{"id":"backup","question":"重要资料应该怎样备份才更稳妥？","expected_source":"文件整理与备份.txt","answer_keywords":["副本","云端"],"should_answer":true}
+{"id":"excel_slow","question":"Excel 工作簿打开很慢怎么办？","expected_source":"办公软件排障.txt","answer_keywords":["加载项","复杂公式"],"should_answer":true}
+{"id":"pdf_copy","question":"PDF 无法复制文字一般是什么原因？","expected_source":"办公软件排障.txt","answer_keywords":["扫描图片","OCR"],"should_answer":true}
+{"id":"unknown_mail","question":"如何配置企业邮件服务器？","expected_source":null,"answer_keywords":[],"should_answer":false}
+{"id":"unknown_docker","question":"怎样部署一个 Kubernetes 集群？","expected_source":null,"answer_keywords":[],"should_answer":false}
+{"id":"unknown_tax","question":"今年个人所得税怎么计算？","expected_source":null,"answer_keywords":[],"should_answer":false}
+{"id":"unknown_camera","question":"如何修复相机镜头无法对焦？","expected_source":null,"answer_keywords":[],"should_answer":false}
